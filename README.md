@@ -10,9 +10,11 @@
 二、如何使用
 
 1、git 到本地之后，进入code_http文件夹后
+
           cd code_http
           
           
 2、运行start.sh 直接进行使用，绑定的是20000端口，可自己进行修改
+
           ./start.sh
 
