@@ -5,6 +5,8 @@
 3. 使用多线程，使用脚本自动化生成；
 4. 支持HTTP协议的GET和POST请求；
 5. 支持CGI；
+
+
 二、如何使用
 1、git 到本地之后，进入code_http文件夹后，使用make进行编译
           cd code_http
