@@ -1,0 +1,456 @@
+#ifndef __PROTOCOL__UTIL_HPP__
+#define __PROTOCOL__UTIL_HPP__
+
+#include <string>
+#include <string.h>
+#include <strings.h>
+#include <sstream>
+#include <unistd.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/sendfile.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unordered_map>
+#include <sys/wait.h>
+#include "Log.hpp"
+
+
+#define OK 200
+#define NOT_FOUND 404
+
+#define WEB_ROOT "wwwroot"
+#define HOME_PAGE "index.html" 
+#define HTTP_VERSION "HTTP/1.1"
+
+
+unordered_map<string, string> stuffix_map = {
+    {".html", "text/html"},
+    {".htm", "text/html"},
+    {".css", "text/css"},
+    {".js", "application/x-javascript"}
+
+};
+class ProtocolUtil{
+public:
+    static void MakeKV(unordered_map<string, string> &kv, string str)
+    {
+        size_t pos = str.find(": ");
+        if(string::npos == pos){
+            return;
+        }
+        string k = str.substr(0,pos);
+        string v = str.substr(pos+2);
+
+        kv.insert(make_pair(k,v));
+    }
+    static string IntToString(int code)
+    {
+        stringstream ss;
+        ss << code;
+        return ss.str();
+    }
+    static string CodeToDesc(int code)
+    {
+        switch(code){
+        case 200:
+            return "OK";
+        case 404:
+            return "NOT_FOUND";
+        default:
+            return "UNKNOW";
+        }
+    }
+    static string SuffixToType(const string &suffix)
+    {
+        return stuffix_map[suffix];
+    }
+};
+
+class Request{
+public:
+    string rq_line;
+    string rq_head;
+    string blank;
+    string rq_text;
+private:
+    string method;
+    string uri;
+    string version;
+    bool cgi;//method=POST,GET->uri(?)
+
+    string path;
+    string param;
+    string resource_suffix;
+    int resource_size;
+    unordered_map<string,string> head_kv;
+    int content_length;
+public:
+    Request():blank("\n"), cgi(false), path(WEB_ROOT), resource_suffix(".html"), resource_size(0), content_length(-1)
+    {}
+    void RequestLineParse()
+    {
+        stringstream ss(rq_line);
+        ss >> method >> uri >> version;
+    }
+    int GetResourceSize()
+    {
+        return resource_size;
+    }
+    string GetSuffix()
+    {
+        return resource_suffix;
+    }
+    void UriParse()
+    {
+        if(strcasecmp(method.c_str(),"GET") == 0){
+            size_t pos = uri.find('?');
+            if(string::npos != pos){
+                cgi = true;
+                path += uri.substr(0, pos);
+                param += uri.substr(pos+1);
+            }
+            else{
+                path += uri;
+            }
+        }
+        else{
+            path += uri;
+        }
+        if(path[path.size() - 1] == '/'){
+            path += HOME_PAGE;
+        }
+    }
+    bool RequestHeadParse()
+    {
+        int start = 0;
+        while(start < rq_head.size()){
+            size_t pos = rq_head.find('\n', start);
+            if(string::npos == pos){
+                break;
+            }
+            string sub_string = rq_head.substr(start, pos - start);
+            if(!sub_string.empty()){
+                ProtocolUtil::MakeKV(head_kv, sub_string);
+            }
+            else{
+                break;
+            }
+            start = pos + 1;
+        }
+        return true;
+    }
+    string &GetPath()
+    {
+        return path;
+    }
+    int GetContentLength()
+    {
+        string cl = head_kv["Content-Length"];
+        if(cl.empty()){
+            stringstream ss(cl);
+            ss >> content_length;
+        }
+        return content_length;
+
+    }
+    bool IsMethodLegal()
+    {
+        if((strcasecmp(method.c_str(), "GET") == 0) || (cgi = (strcasecmp(method.c_str(), "POST") == 0))){
+            return true;
+        }
+        return false;
+    }
+
+    bool IsPathLegal()
+    {
+        struct stat st;
+        if(stat(path.c_str(),&st) < 0){
+            LOG(WARNING, " path is not found!");
+            return false;
+
+        }
+        if(S_ISDIR(st.st_mode)){
+            path += "/";
+            path += HOME_PAGE;
+        }
+        else{
+            if((st.st_mode & S_IXUSR) || (st.st_mode & S_IXGRP) || (st.st_mode & S_IXOTH)){
+                cgi = true;
+            }
+        }
+        resource_size = st.st_size;
+        size_t pos = path.rfind(".");
+        if(string::npos!=pos){
+            resource_suffix = path.substr(pos);
+        }
+        return true;
+
+    }
+    bool IsNeedRecvText()
+    {
+        if(strcasecmp(method.c_str(),"POST") == 0){
+            return true;
+        }
+        return false;
+    }
+    string &GetParam()
+    {
+        return param;
+    }
+    bool IsCgi()
+    {
+        return cgi;
+    }
+    ~Request()
+    {}
+};
+class Response{
+public:
+    string rsp_line;
+    string rsp_head;
+    string blank;
+    string rsp_text;
+public:
+    int code;
+    int fd;
+public:
+    Response():blank("\n"), code(OK), fd(-1)
+    {}
+    void MakeStatusLine()
+    {
+        rsp_line = HTTP_VERSION;
+        rsp_line += " ";
+        rsp_line += ProtocolUtil::IntToString(code);
+        rsp_line += " ";
+        rsp_line += ProtocolUtil::CodeToDesc(code);
+        rsp_line += "\n";
+    }
+    void MakeResponseHead(Request *&rq)
+    {
+        rsp_head = "Content-Length";
+        rsp_head += ProtocolUtil::IntToString(rq->GetResourceSize());
+        rsp_head += "\n";
+        rsp_head += "Content-Type: ";
+        string suffix = rq->GetSuffix();
+        rsp_head += ProtocolUtil::SuffixToType(suffix);
+        rsp_head += "\n";
+    }
+    void OpenResource(Request *&rq)
+    {
+        string path = rq->GetPath();
+        fd = open(path.c_str(), O_RDONLY);
+    }
+    ~Response()
+    {
+        if(fd >= 0){
+            close(fd);
+        }
+    }
+
+};
+class Connect{
+private:
+    int sock;
+public:
+    Connect(int sock_):sock(sock_)
+    {}
+    int RecvOneLine(string &line)
+    {
+        char c = 'X';
+        while(c != '\n'){
+            ssize_t s = recv(sock, &c, 1, 0);
+            if(s > 0){
+                if(c == '\r'){
+                    recv(sock, &c, 1, MSG_PEEK);
+                    if(c == '\n'){
+                        recv(sock, &c, 1, 0);
+                    }
+                    else{
+                        c = '\n';
+                    }
+                }
+                line.push_back(c);
+            }
+            else{
+                break;
+            }
+        }
+        return line.size();
+    }
+    void RecvRequestHead(string &head)
+    {
+        head = "";
+        string line;
+        while(line != "\n"){
+            line = "";
+            RecvOneLine(line);
+            head += line;
+
+        }
+    }
+    void RecvRequestText(string &text, int len, string &param)
+    {
+        char c;
+        int i = 0;
+
+        while(i < len){
+            recv(sock, &c, 1, 0);
+            text.push_back(c);
+        }
+        param = text;
+    }
+    void SendResponse(Response *&rsp,Request *&rq, bool cgi)
+    {
+        string &rsp_line = rsp->rsp_line;
+        string &rsp_head = rsp->rsp_head;
+        string &blank = rsp->blank;
+        send(sock, rsp_line.c_str(), rsp_line.size(), 0);
+        send(sock, rsp_head.c_str(), rsp_head.size(), 0);
+        send(sock,blank.c_str(), blank.size(), 0);
+        if(cgi){
+            send(sock, rsp->rsp_text.c_str(),blank.size(), 0);
+        }
+        else{
+
+            int &fd = rsp->fd;
+            sendfile(sock, fd, NULL, rq->GetResourceSize());
+        }
+    }
+    ~Connect()
+    {
+        if(sock >= 0){
+            close(sock);
+        }
+    }
+
+};
+class Entry{
+public:
+    static void ProcessNoneCgi(Connect *&conn, Request *&rq, Response *&rsp)
+    {
+        int &code = rsp->code;
+        rsp->MakeStatusLine();
+        rsp->MakeResponseHead(rq);
+        rsp->OpenResource(rq);
+        conn->SendResponse(rsp, rq, false);
+
+
+    }
+
+    static void ProcessCgi(Connect *&conn, Request *&rq, Response *& rsp)
+    {
+        int &code = rsp->code;
+        int input[2];
+        int output[2];
+        string &param = rq->GetParam();
+        string &rsp_text = rsp->rsp_text;
+
+        pipe(input);
+        pipe(output);
+
+        pid_t id = fork();
+        if(id < 0){
+            LOG(INFO,"fork error");
+            code = NOT_FOUND;
+            return;
+        }
+        else if(id == 0){
+            close(input[1]);
+            close(output[0]);
+            dup2(input[1],0);
+            dup2(output[0],1);
+            string cl_env = "Content-Length=";
+            const string &path = rq->GetPath();
+            cl_env += ProtocolUtil::IntToString(param.size());
+            putenv((char*)cl_env.c_str());
+            execl(path.c_str(),path.c_str(),NULL);
+            exit(1);
+        }else{
+            close(input[0]);
+            close(output[1]);
+            size_t size = param.size();
+            size_t total = 0;
+            size_t curr = 0;
+            const char *p = param.c_str();
+
+            while(total < size && (curr = write(input[1],p+total, size)))
+                total += curr;
+
+            char c;
+            while(read(output[0],&c,1)>0){
+                rsp_text.push_back(c);
+
+            }
+            waitpid(id,NULL,0);
+            rsp->MakeStatusLine();
+            rq->GetResourceSize();
+            rsp->MakeResponseHead(rq);
+            conn->SendResponse(rsp,rq,true);
+            close(input[1]);
+            close(output[0]);
+        }
+    }
+    static int PorcessResponse(Connect *&conn, Request *&rq, Response *& rsp)
+    {
+        if(rq->IsCgi()){
+            ProcessCgi(conn,rq,rsp);
+        }
+        else{
+            ProcessNoneCgi(conn, rq, rsp);
+        }
+        return 0;
+    }
+    static int HandelRequest(int arg) 
+    {
+        int sock =  arg;
+       // delete (int*)arg;
+        Connect *conn = new Connect(sock);
+        Request *rq = new Request();
+        Response *rsp = new Response();
+        int &code = rsp->code;
+        conn->RecvOneLine(rq->rq_line);
+        LOG(INFO, "RecvOneLine is ok!!!");            
+        rq->RequestLineParse();
+        if( !rq->IsMethodLegal() ){
+            LOG(INFO, "The legal is not exits!!!");
+            code = NOT_FOUND;
+            goto end;
+        }
+        rq->UriParse();
+        LOG(INFO, "UriParse is ok!!");       
+        //LOG(INFO,rq->GetPath());
+        if( !rq->IsPathLegal()){
+            code = NOT_FOUND;
+            goto end;
+        }
+        LOG(INFO,"request path is OK!");
+        conn->RecvRequestHead(rq->rq_head);
+        if(rq->RequestHeadParse()){
+            LOG(INFO," Head parse success!");
+        }
+        else{
+            code = NOT_FOUND;
+            goto end;
+
+        }
+        if(rq->IsNeedRecvText()){
+            conn->RecvRequestText(rq->rq_text, rq->GetContentLength(), rq->GetParam());
+        }
+        PorcessResponse(conn, rq, rsp);
+
+end:
+        if(code != OK){
+
+        }
+        delete conn;
+        delete rq;
+        delete rsp;
+        return code;
+    }
+};
+
+#endif
