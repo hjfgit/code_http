@@ -9,10 +9,10 @@
 
 二、如何使用
 
-1、git 到本地之后，进入code_http文件夹后，使用make进行编译
+1、git 到本地之后，进入code_http文件夹后
           cd code_http
-          make
           
-2、生成一个Http_server 的可执行程序，可直接绑定ip地址进行使用，例如使用20000端口
-          ./Http_server 20000
+          
+2、运行start.sh 直接进行使用，绑定的是20000端口，可自己进行修改
+          ./start.sh
 
